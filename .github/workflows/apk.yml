@@ -1,0 +1,97 @@
+name: Android apk
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      QTVER: 6.4.1
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: recursive
+
+    - name: Detect release tag
+      run: |
+        TAG=${GITHUB_REF#refs/*/}
+        if [[ "$TAG" == v*.*.* ]]; then
+          VERSION=${TAG#v}
+        else
+          VERSION=$(git log -1 --format=%cd --date=format:%Y%m%d)_$(git rev-parse --short HEAD)
+        fi
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+    - name: Cache Qt
+      id: cache-qt
+      uses: actions/cache@v2
+      with:
+        path: ${{ runner.workspace }}/Qt
+        key: ${{ runner.os }}-cache-qt-${{ env.QTVER }}
+
+    - name: Install Qt
+      env:
+        QTDIR: ${{ runner.workspace }}/Qt
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -qy \
+          build-essential libgl1-mesa-dev libxkbcommon-x11-0 libpulse-dev \
+          libxcb-util1 libxcb-glx0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+          libxcb-randr0 libxcb-render-util0 libxcb-render0 libxcb-shape0 \
+          libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb1
+        if [ "${{ steps.cache-qt.outputs.cache-hit }}" != "true" ]; then
+          pip3 install aqtinstall
+          aqt install-qt -O $QTDIR linux desktop $QTVER gcc_64
+          aqt install-qt -O $QTDIR linux android $QTVER android_armv7
+        fi
+        echo "$QTDIR/$QTVER/android_armv7/bin:$QTDIR/$QTVER/gcc_64/bin" >> $GITHUB_PATH
+        echo "Qt_HOST_DIR=$QTDIR/$QTVER/gcc_64" >> $GITHUB_ENV
+        echo "Qt_DIR=$QTDIR/$QTVER/android_armv7" >> $GITHUB_ENV
+
+    - name: Build
+      env:
+        ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        ANDROID_NDK_ROOT: /usr/local/lib/android/sdk/ndk/23.2.8568313
+        ANDROID_NDK_HOST: linux-x86_64
+      run: |
+        $ANDROID_SDK_ROOT/tools/bin/sdkmanager --uninstall "platforms;android-33" "platforms;android-32"
+        export PATH="$ANDROID_NDK_ROOT/prebuilt/$ANDROID_NDK_HOST/bin:$PATH"
+        mkdir build
+        cd build
+        cmake .. \
+          -D ANDROID_NATIVE_API_LEVEL=23 \
+          -D ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT \
+          -D QT_ANDROID_ABIS=armeabi-v7a \
+          -D QT_HOST_PATH=$Qt_HOST_DIR \
+          -D CMAKE_BUILD_TYPE=Debug \
+          -D CMAKE_FIND_ROOT_PATH=$Qt_DIR \
+          -D CMAKE_PREFIX_PATH=$Qt_DIR \
+          -D CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake
+        cmake ..
+        make
+        mv android-build/build/outputs/apk/debug/android-build-debug.apk tasklist_$VERSION.apk
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: Android
+        path: build/*.apk
+
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        prerelease: ${{ contains(github.ref, '-prerelease') }}
+        files: |
+          build/tasklist_$VERSION.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
